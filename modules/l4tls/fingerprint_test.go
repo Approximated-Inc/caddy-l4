@@ -1,6 +1,7 @@
 package l4tls
 
 import (
+	"encoding/hex"
 	"os"
 	"testing"
 )
@@ -59,6 +60,22 @@ func TestJA3_stripsGREASE(t *testing.T) {
 	without := JA3(0x0301, []uint16{0xc02f, 0xc030}, []uint16{0x0000, 0x0017}, []uint16{0x001d}, []uint8{0x00})
 	if withG != without {
 		t.Errorf("GREASE not filtered: withGREASE=%q != withoutGREASE=%q", withG, without)
+	}
+}
+
+func TestVectorsParse(t *testing.T) {
+	if len(JAVectors) == 0 {
+		t.Skip("no vectors vendored yet")
+	}
+	for _, v := range JAVectors {
+		raw, err := hex.DecodeString(v.ClientHello)
+		if err != nil {
+			t.Fatalf("%s: bad hex: %v", v.Name, err)
+		}
+		chi := parseRawClientHello(raw)
+		if len(chi.CipherSuites) == 0 {
+			t.Errorf("%s: parser produced no cipher suites", v.Name)
+		}
 	}
 }
 
