@@ -79,6 +79,88 @@ func TestVectorsParse(t *testing.T) {
 	}
 }
 
+func TestJA4_vectors(t *testing.T) {
+	if len(JAVectors) == 0 {
+		t.Skip("no vectors vendored")
+	}
+	for _, v := range JAVectors {
+		if v.ExpectedJA4 == "" {
+			continue
+		}
+		raw, err := hex.DecodeString(v.ClientHello)
+		if err != nil {
+			t.Fatalf("%s: bad hex: %v", v.Name, err)
+		}
+		chi := parseRawClientHello(raw)
+		got := JA4(ja4InputFromCHI(chi))
+		if got != v.ExpectedJA4 {
+			t.Errorf("%s: JA4 = %q, want %q", v.Name, got, v.ExpectedJA4)
+		}
+	}
+}
+
+func TestJA3_vectors(t *testing.T) {
+	if len(JAVectors) == 0 {
+		t.Skip("no vectors vendored")
+	}
+	for _, v := range JAVectors {
+		if v.ExpectedJA3 == "" {
+			continue // JA3 not asserted for this vector
+		}
+		raw, _ := hex.DecodeString(v.ClientHello)
+		chi := parseRawClientHello(raw)
+		got := JA3(chi.Version, chi.CipherSuites, chi.Extensions,
+			curveIDsToUint16(chi.SupportedCurves), chi.SupportedPoints)
+		if got != v.ExpectedJA3 {
+			t.Errorf("%s: JA3 = %q, want %q", v.Name, got, v.ExpectedJA3)
+		}
+	}
+}
+
+func TestJA4a_encoding(t *testing.T) {
+	in := JA4Input{
+		SupportedVersions: []uint16{0x0a0a, 0x0304, 0x0303},
+		CipherSuites:      append([]uint16{0x0a0a}, make([]uint16, 15)...),
+		Extensions:        append([]uint16{0x1a1a}, make([]uint16, 16)...),
+		ALPNs:             []string{"h2"},
+		SNIPresent:        true,
+	}
+	if got := ja4a(in); got != "t13d1516h2" {
+		t.Errorf("ja4a = %q, want t13d1516h2", got)
+	}
+}
+
+func TestJA4_countCap(t *testing.T) {
+	many := make([]uint16, 120)
+	for i := range many {
+		many[i] = uint16(0x1300 + i)
+	}
+	in := JA4Input{SupportedVersions: []uint16{0x0304}, CipherSuites: many, Extensions: many, ALPNs: nil, SNIPresent: false}
+	if got := ja4a(in); got != "t13i9999"+"00" {
+		t.Errorf("ja4a = %q, want t13i999900", got)
+	}
+}
+
+func TestJA4c_noSigAlgs(t *testing.T) {
+	got := ja4c([]uint16{0x0017, 0x0000, 0x0010, 0x002b}, nil)
+	want := sha12("0017,002b") // 0000 + 0010 removed, sorted
+	if got != want {
+		t.Errorf("ja4c noSig = %q, want %q", got, want)
+	}
+}
+
+func TestJA4_emptySentinels(t *testing.T) {
+	if got := ja4b(nil); got != "000000000000" {
+		t.Errorf("ja4b(nil) = %q, want 000000000000", got)
+	}
+	if got := ja4b([]uint16{0x0a0a}); got != "000000000000" { // only GREASE -> empty after strip
+		t.Errorf("ja4b(GREASE-only) = %q, want 000000000000", got)
+	}
+	if got := ja4c(nil, nil); got != "000000000000" {
+		t.Errorf("ja4c(nil,nil) = %q, want 000000000000", got)
+	}
+}
+
 func TestJA3_emptyLists(t *testing.T) {
 	// version only, everything else empty -> "769,,,,"
 	got := JA3(0x0301, nil, nil, nil, nil)
