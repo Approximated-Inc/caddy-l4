@@ -2,8 +2,12 @@ package l4tls
 
 import (
 	"encoding/hex"
+	"net"
 	"os"
 	"testing"
+
+	"github.com/mholt/caddy-l4/layer4"
+	"go.uber.org/zap"
 )
 
 func TestIsGREASE(t *testing.T) {
@@ -167,5 +171,45 @@ func TestJA3_emptyLists(t *testing.T) {
 	want := "f5d1076d0d11b5cd81c4c4e8e8ee881a" // md5("769,,,,")
 	if got != want {
 		t.Errorf("JA3 empty = %q, want %q", got, want)
+	}
+}
+
+func TestMatch_setsFingerprintVars(t *testing.T) {
+	if len(JAVectors) == 0 {
+		t.Skip("no vectors")
+	}
+	v := JAVectors[0] // firefox_tls13_no_grease: has both ExpectedJA3 + ExpectedJA4
+	hello, err := hex.DecodeString(v.ClientHello)
+	if err != nil {
+		t.Fatalf("bad hex: %v", err)
+	}
+	// Frame as one TLS handshake record: type=0x16, version=0x0301, len(hello).
+	rec := append([]byte{0x16, 0x03, 0x01, byte(len(hello) >> 8), byte(len(hello))}, hello...)
+
+	in, out := net.Pipe()
+	defer in.Close()
+	defer out.Close()
+	cx := layer4.WrapConnection(out, []byte{}, zap.NewNop())
+	defer cx.Close()
+
+	go func() {
+		_, _ = in.Write(rec)
+	}()
+
+	m := &MatchTLS{}
+	m.logger = zap.NewNop()
+
+	matched, err := m.Match(cx)
+	if err != nil {
+		t.Fatalf("Match error: %v", err)
+	}
+	if !matched {
+		t.Fatal("expected match with no sub-matchers")
+	}
+	if got := cx.GetVar("tls_ja3"); got != v.ExpectedJA3 {
+		t.Errorf("tls_ja3 = %v, want %v", got, v.ExpectedJA3)
+	}
+	if got := cx.GetVar("tls_ja4"); got != v.ExpectedJA4 {
+		t.Errorf("tls_ja4 = %v, want %v", got, v.ExpectedJA4)
 	}
 }
