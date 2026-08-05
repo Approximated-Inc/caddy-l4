@@ -169,6 +169,19 @@ func (m *MatchTLS) Match(cx *layer4.Connection) (bool, error) {
 	repl.Set(tlsServerNameReplKey, chi.ServerName)
 	repl.Set(tlsVersionReplKey, caddytls.ProtocolName(chi.Version))
 
+	// Compute TLS fingerprints once per connection (we already have the
+	// fully parsed ClientHello). Downstream apx_l4_fingerprint_stats
+	// (apx-caddy-stats) reads the cx vars; the replacer keys make the
+	// values usable in Caddyfile placeholders too.
+	ja3 := JA3(chi.Version, chi.CipherSuites, chi.Extensions,
+		curveIDsToUint16(chi.SupportedCurves), chi.SupportedPoints)
+	ja4 := JA4(ja4InputFromCHI(chi))
+
+	cx.SetVar("tls_ja3", ja3)
+	cx.SetVar("tls_ja4", ja4)
+	repl.Set(tlsJA3ReplKey, ja3)
+	repl.Set(tlsJA4ReplKey, ja4)
+
 	for _, matcher := range m.matchers {
 		// TODO: even though we have more data than the standard lib's
 		// ClientHelloInfo lets us fill, the matcher modules we use do
@@ -224,6 +237,8 @@ const (
 
 	tlsServerNameReplKey = tlsReplPrefix + "server_name"
 	tlsVersionReplKey    = tlsReplPrefix + "version"
+	tlsJA3ReplKey        = tlsReplPrefix + "ja3"
+	tlsJA4ReplKey        = tlsReplPrefix + "ja4"
 )
 
 // ParseCaddyfileNestedMatcherSet parses the Caddyfile tokens for a nested
