@@ -62,7 +62,11 @@ type Handler struct {
 
 	proxyProtocolVersion uint8
 
-	ctx    caddy.Context
+	// Only the std context is retained (not the caddy.Context): live handler
+	// goroutines hold this field, and a caddy.Context would pin the entire
+	// config generation (Context carries cfg *Config) for as long as any
+	// proxied connection is in flight. Only Done() is needed after Provision.
+	ctx    context.Context
 	logger *zap.Logger
 }
 
@@ -76,7 +80,7 @@ func (*Handler) CaddyModule() caddy.ModuleInfo {
 
 // Provision sets up the handler.
 func (h *Handler) Provision(ctx caddy.Context) error {
-	h.ctx = ctx
+	h.ctx = ctx.Context
 	h.logger = ctx.Logger(h)
 
 	// start by loading modules

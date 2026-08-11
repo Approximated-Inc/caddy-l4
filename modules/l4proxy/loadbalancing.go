@@ -15,6 +15,7 @@
 package l4proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -56,7 +57,7 @@ type LoadBalancing struct {
 // connection. If true is returned, it has already blocked long enough
 // before the next retry (i.e. no more sleeping is needed). If false
 // is returned, the handler should stop trying to proxy the connection.
-func (lb LoadBalancing) tryAgain(ctx caddy.Context, start time.Time) bool {
+func (lb LoadBalancing) tryAgain(ctx context.Context, start time.Time) bool {
 	// if we've tried long enough, break
 	if time.Since(start) >= time.Duration(lb.TryDuration) {
 		return false
