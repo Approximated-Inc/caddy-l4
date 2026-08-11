@@ -47,6 +47,9 @@ func init() {
 type Handler struct {
 	ConnectionPolicies caddytls.ConnectionPolicies `json:"connection_policies,omitempty"`
 
+	// Unlike l4proxy, this must remain a caddy.Context: Handle calls
+	// t.ConnectionPolicies.TLSConfig(t.ctx), which needs it. Known remaining
+	// pin — a live connection in this handler retains the config generation.
 	ctx    caddy.Context
 	logger *zap.Logger
 }

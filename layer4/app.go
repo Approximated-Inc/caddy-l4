@@ -17,6 +17,7 @@ package layer4
 import (
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
@@ -32,6 +33,13 @@ type App struct {
 	// a unique name identifying the server for your own convenience;
 	// the order of servers does not matter.
 	Servers map[string]*Server `json:"servers,omitempty"`
+
+	// GracePeriod is how long in-flight connections get to finish after
+	// the app stops (e.g. on a config reload) before they are
+	// force-closed. Connections that outlive a reload keep the old
+	// config generation in memory, so retention is bounded by this.
+	// Default: 30s.
+	GracePeriod caddy.Duration `json:"grace_period,omitempty"`
 
 	listeners   []net.Listener
 	packetConns []net.PacketConn
@@ -51,6 +59,10 @@ func (*App) CaddyModule() caddy.ModuleInfo {
 func (a *App) Provision(ctx caddy.Context) error {
 	a.ctx = ctx
 	a.logger = ctx.Logger()
+
+	if a.GracePeriod <= 0 {
+		a.GracePeriod = caddy.Duration(GracePeriodDefault)
+	}
 
 	for srvName, srv := range a.Servers {
 		err := srv.Provision(ctx, a.logger)
@@ -107,7 +119,9 @@ func (a *App) Start() error {
 	return nil
 }
 
-// Stop stops the servers and closes all listeners.
+// Stop stops the servers, closes all listeners, and drains in-flight
+// connections: they get up to GracePeriod to finish before being
+// force-closed, so they cannot pin the old config generation forever.
 func (a *App) Stop() error {
 	for _, pc := range a.packetConns {
 		err := pc.Close()
@@ -128,6 +142,11 @@ func (a *App) Stop() error {
 				zap.Error(err),
 			)
 		}
+	}
+	// drain asynchronously so config reloads are not delayed by the
+	// grace period; retention stays bounded either way
+	for _, s := range a.Servers {
+		go s.drainConns(time.Duration(a.GracePeriod))
 	}
 	return nil
 }
