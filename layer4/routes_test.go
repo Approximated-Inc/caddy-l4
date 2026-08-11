@@ -17,6 +17,13 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
+func init() {
+	// register test modules once; registering inside a test body panics
+	// ("module already registered") when the package runs with -count>1
+	caddy.RegisterModule(&testIoMatcher{})
+	caddy.RegisterModule(&testIoUdpMatcher{})
+}
+
 type testIoMatcher struct{}
 
 func (*testIoMatcher) CaddyModule() caddy.ModuleInfo {
@@ -35,8 +42,6 @@ func (m *testIoMatcher) Match(cx *Connection) (bool, error) {
 func TestMatchingTimeoutWorks(t *testing.T) {
 	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
 	defer cancel()
-
-	caddy.RegisterModule(&testIoMatcher{})
 
 	routes := RouteList{&Route{
 		MatcherSetsRaw: caddyhttp.RawMatcherSets{
@@ -123,8 +128,6 @@ func (m *testIoUdpMatcher) Match(cx *Connection) (bool, error) {
 func TestMatchingTimeoutWorksUDP(t *testing.T) {
 	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
 	defer cancel()
-
-	caddy.RegisterModule(&testIoUdpMatcher{})
 
 	routes := RouteList{&Route{
 		MatcherSetsRaw: caddyhttp.RawMatcherSets{
