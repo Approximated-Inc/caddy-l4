@@ -180,7 +180,12 @@ func (l *listener) handle(conn net.Conn) {
 	start := time.Now()
 	err = l.compiledRoute.Handle(cx)
 	duration := time.Since(start)
-	if err != nil && !errors.Is(err, errHijacked) {
+	if errors.Is(err, errHijacked) {
+		// the connection was handed off and is now read/written
+		// concurrently; it must not be touched here, not even for stats
+		return
+	}
+	if err != nil {
 		l.logger.Error("handling connection", zap.Error(err))
 	}
 

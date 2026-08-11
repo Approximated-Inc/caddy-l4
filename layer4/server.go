@@ -33,6 +33,14 @@ import (
 const (
 	idleTimeoutDefault     = 30 * time.Second
 	MatchingTimeoutDefault = 3 * time.Second
+
+	// GracePeriodDefault is how long in-flight connections get to finish
+	// after the app stops before they are force-closed.
+	GracePeriodDefault = 30 * time.Second
+
+	// forceCloseWait is how long, after force-closing connections, to wait
+	// for their handlers to return before logging an error.
+	forceCloseWait = 5 * time.Second
 )
 
 // Server represents a Caddy layer4 server.
@@ -54,6 +62,13 @@ type Server struct {
 	logger        *zap.Logger
 	listenAddrs   []caddy.NetworkAddress
 	compiledRoute Handler
+
+	// in-flight connection tracking, so drainConns can wait for and
+	// force-close connections when the app stops
+	connsMu  sync.Mutex
+	conns    map[net.Conn]struct{}
+	connWG   sync.WaitGroup
+	draining bool
 }
 
 // Provision sets up the server.
@@ -98,11 +113,95 @@ func (s *Server) serve(ln net.Listener) error {
 		if err != nil {
 			return err
 		}
-		go s.handle(conn)
+		if !s.registerConn(conn, true) {
+			// server is draining; refuse new connections
+			_ = conn.Close()
+			continue
+		}
+		go func(conn net.Conn) {
+			defer s.unregisterConn(conn)
+			s.handle(conn)
+		}(conn)
+	}
+}
+
+// registerConn tracks an in-flight connection so drainConns can wait for
+// it and, if forceClosable, force-close it. It reports whether the
+// connection may be handled; false means the server is draining.
+func (s *Server) registerConn(conn net.Conn, forceClosable bool) bool {
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	if s.draining {
+		return false
+	}
+	s.connWG.Add(1)
+	if forceClosable {
+		if s.conns == nil {
+			s.conns = make(map[net.Conn]struct{})
+		}
+		s.conns[conn] = struct{}{}
+	}
+	return true
+}
+
+// unregisterConn removes a connection registered by registerConn.
+func (s *Server) unregisterConn(conn net.Conn) {
+	s.connsMu.Lock()
+	delete(s.conns, conn)
+	s.connsMu.Unlock()
+	s.connWG.Done()
+}
+
+// drainConns waits up to grace for in-flight connections to finish, then
+// force-closes any that remain. Without this, a connection that outlives
+// a config reload keeps the old config generation (via the compiled
+// routes' provisioned handlers) in memory for its full lifetime.
+func (s *Server) drainConns(grace time.Duration) {
+	s.connsMu.Lock()
+	s.draining = true
+	s.connsMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		s.connWG.Wait()
+		close(done)
+	}()
+
+	if grace > 0 {
+		select {
+		case <-done:
+			return
+		case <-time.After(grace):
+		}
+	}
+
+	s.connsMu.Lock()
+	remaining := len(s.conns)
+	for conn := range s.conns {
+		_ = conn.Close()
+	}
+	s.connsMu.Unlock()
+
+	if remaining > 0 {
+		s.logger.Warn("force-closed connections still in flight after grace period",
+			zap.Int("count", remaining),
+			zap.Duration("grace_period", grace),
+		)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(forceCloseWait):
+		s.logger.Error("connection handlers still running after force close; old config remains referenced until they return")
 	}
 }
 
 func (s *Server) servePacket(pc net.PacketConn) error {
+	// closed when this loop exits, so packetConn sends to closeCh
+	// cannot block forever once nothing is receiving from it
+	loopDone := make(chan struct{})
+	defer close(loopDone)
+
 	// Spawn a goroutine whose only job is to consume packets from the socket
 	// and send to the packets channel.
 	packets := make(chan packet, 10)
@@ -129,6 +228,16 @@ func (s *Server) servePacket(pc net.PacketConn) error {
 	// udpConns tracks active packetConns by downstream address:port. They will
 	// be removed from this map after being closed.
 	udpConns := make(map[string]*packetConn)
+	// on exit (e.g. the socket was closed by App.Stop), signal EOF to the
+	// remaining packet conns so their handlers finish promptly
+	defer func() {
+		for _, conn := range udpConns {
+			close(conn.readCh)
+			for pkt := range conn.readCh {
+				udpBufPool.Put(pkt.pooledBuf)
+			}
+		}
+	}()
 	// closeCh is used to receive notifications of socket closures from
 	// packetConn, which allows us to remove stale connections (whose
 	// proxy handlers have completed) from the udpConns map.
@@ -162,10 +271,17 @@ func (s *Server) servePacket(pc net.PacketConn) error {
 					readCh:      make(chan *packet, 5),
 					addr:        pkt.addr,
 					closeCh:     closeCh,
+					loopDone:    loopDone,
 					idleTimeout: time.Duration(s.IdleTimeout),
+				}
+				if !s.registerConn(conn, false) {
+					// server is draining; drop the packet
+					udpBufPool.Put(pkt.pooledBuf)
+					continue
 				}
 				udpConns[pkt.addr.String()] = conn
 				go func(conn *packetConn) {
+					defer s.unregisterConn(conn)
 					s.handle(conn)
 					// It might seem cleaner to send to closeCh here rather than
 					// in packetConn, but doing it earlier in packetConn closes
@@ -270,6 +386,8 @@ type packetConn struct {
 	addr    net.Addr
 	readCh  chan *packet
 	closeCh chan string
+	// closed when the server loop that receives from closeCh has exited
+	loopDone chan struct{}
 	// If not nil, then the previous Read() call didn't consume all the data
 	// from the buffer, and this packet will be reused in the next Read()
 	// without waiting for readCh.
@@ -364,7 +482,10 @@ func (pc *packetConn) Read(b []byte) (n int, err error) {
 	// Although Close() also does this, we inform the server loop early about
 	// the closure to ensure that if any new packets are received from this
 	// connection in the meantime, a new handler will be started.
-	pc.closeCh <- pc.addr.String()
+	select {
+	case pc.closeCh <- pc.addr.String():
+	case <-pc.loopDone:
+	}
 	// Returning EOF here ensures that io.Copy() waiting on the downstream for
 	// reads will terminate.
 	return 0, io.EOF
@@ -382,7 +503,10 @@ func (pc *packetConn) Close() error {
 	// We may have already done this earlier in Read(), but just in case
 	// Read() wasn't being called, (re-)notify server loop we're closed.
 	// Server loop is responsible to close readCh to abort Read() to avoid race.
-	pc.closeCh <- pc.addr.String()
+	select {
+	case pc.closeCh <- pc.addr.String():
+	case <-pc.loopDone:
+	}
 	// We don't call net.PacketConn.Close() here as we would stop the UDP
 	// server.
 	return nil
