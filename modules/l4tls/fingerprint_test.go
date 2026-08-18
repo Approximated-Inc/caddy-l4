@@ -232,6 +232,8 @@ func TestJA4_transportPrefix(t *testing.T) {
 		{"zero value defaults to tcp", 0, 't'},
 		{"explicit tcp", 't', 't'},
 		{"quic", 'q', 'q'},
+		{"dtls", 'd', 'd'},
+		{"unsupported value falls back to tcp", 'x', 't'},
 	}
 
 	for _, c := range cases {
