@@ -101,7 +101,11 @@ func ja4a(in JA4Input) string {
 	}
 	nc := cap2(countNonGREASE(in.CipherSuites))
 	ne := cap2(countNonGREASE(in.Extensions))
-	return fmt.Sprintf("t%s%s%02d%02d%s", ver, sni, nc, ne, ja4ALPN(in.ALPNs))
+	transport := in.Transport
+	if transport != 't' && transport != 'q' && transport != 'd' {
+		transport = 't'
+	}
+	return fmt.Sprintf("%c%s%s%02d%02d%s", transport, ver, sni, nc, ne, ja4ALPN(in.ALPNs))
 }
 
 // ja4b is the cipher-suite hash component: GREASE removed, 4-hex, sorted
@@ -274,4 +278,9 @@ type JA4Input struct {
 	SignatureAlgos    []uint16 // wire order
 	ALPNs             []string
 	SNIPresent        bool
+	// Transport is the JA4_a leading character: 't' for TLS over TCP, 'q' for
+	// QUIC, 'd' for DTLS. The zero value (and any other non-{'q','d'} value)
+	// is treated as 't', so existing callers and the vendored FoxIO vectors
+	// are unaffected.
+	Transport byte
 }

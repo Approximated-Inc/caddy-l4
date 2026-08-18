@@ -213,3 +213,54 @@ func TestMatch_setsFingerprintVars(t *testing.T) {
 		t.Errorf("tls_ja4 = %v, want %v", got, v.ExpectedJA4)
 	}
 }
+
+func TestJA4_transportPrefix(t *testing.T) {
+	base := JA4Input{
+		SupportedVersions: []uint16{0x0304},
+		CipherSuites:      []uint16{0x1301, 0x1302},
+		Extensions:        []uint16{0x0000, 0x0010},
+		SignatureAlgos:    []uint16{0x0403},
+		ALPNs:             []string{"h2"},
+		SNIPresent:        true,
+	}
+
+	cases := []struct {
+		name      string
+		transport byte
+		wantFirst byte
+	}{
+		{"zero value defaults to tcp", 0, 't'},
+		{"explicit tcp", 't', 't'},
+		{"quic", 'q', 'q'},
+		{"dtls", 'd', 'd'},
+		{"unsupported value falls back to tcp", 'x', 't'},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := base
+			in.Transport = c.transport
+			got := JA4(in)
+			if got[0] != c.wantFirst {
+				t.Errorf("JA4 = %q, first byte = %q, want %q", got, got[0], c.wantFirst)
+			}
+		})
+	}
+}
+
+func TestJA4_transportOnlyChangesFirstByte(t *testing.T) {
+	in := JA4Input{
+		SupportedVersions: []uint16{0x0304},
+		CipherSuites:      []uint16{0x1301},
+		Extensions:        []uint16{0x0000},
+		SignatureAlgos:    []uint16{0x0403},
+		SNIPresent:        true,
+	}
+	tcp := JA4(in)
+	in.Transport = 'q'
+	quic := JA4(in)
+
+	if tcp[1:] != quic[1:] {
+		t.Errorf("transport changed more than the first byte:\n tcp = %q\nquic = %q", tcp, quic)
+	}
+}
